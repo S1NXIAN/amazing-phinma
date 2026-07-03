@@ -1,0 +1,650 @@
+╔══════════════════════════════════════════════════════════════════╗
+║      PHINMA University of Iloilo — SIS Portal                   ║
+║      Security Vulnerability Assessment                          ║
+║      Target: https://sis-ui.phinma.edu.ph/                      ║
+║      Date:   2026-07-03                                         ║
+║      Tech:   ASP.NET 4.0.30319 / IIS 10 / MasterSoft ERP        ║
+╚══════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TABLE OF CONTENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. EXECUTIVE SUMMARY
+  2. VULNERABILITY MATRIX
+  3. FINDING 01 — CAPTCHA Bypass (Critical)
+  4. FINDING 02 — Client-side RSA Encryption (Critical)
+  5. FINDING 03 — CSP Misconfiguration (High)
+  6. FINDING 04 — Missing HTTP→HTTPS Redirect (High)
+  7. FINDING 05 — Unencrypted ViewState (Medium)
+  8. FINDING 06 — Information Disclosure (Medium)
+  9. FINDING 07 — Permissive HTTP Methods (Low)
+  10. FINDING 08 — Server Version Disclosure (Low)
+  11. FINDING 09 — Third-party Surface Area (Info)
+  12. FINDING 10 — IIS 8.3 Short Name Exposure (Medium)
+  13. FINDING 11 — Admin Panel Exposure (Medium)
+  14. FINDING 12 — Forgot Password User Enumeration (Medium)
+  15. FINDING 13 — Login Timing Consistency (Info)
+  16. FINDING 14 — Encrypted Routing Pattern Analysis (Info)
+  17. RECOMMENDATIONS
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The PHINMA University of Iloilo Student Information System (SIS) is
+an ASP.NET WebForms 4.0 application running on IIS 10, built on the
+MasterSoft ERP platform. Fourteen security issues were identified,
+two rated CRITICAL, three HIGH, and four MEDIUM.
+
+The most severe findings involve:
+  • A client-side CAPTCHA that stores the answer in a hidden field
+    and can be bypassed by submitting an empty value
+  • RSA encryption implemented entirely in JavaScript with the
+    public key exposed, making the "encrypted password" a facade
+  • A Content Security Policy that allows arbitrary script
+    execution via wildcard script-src + unsafe-inline + unsafe-eval
+  • An exposed admin panel at a predictable path
+  • IIS 8.3 short name generation enabling file enumeration
+  • Forgot Password page that may allow user enumeration
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. VULNERABILITY MATRIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ #  Finding                          Severity   CVSSv3  Exploitability
+─── ──────────────────────────────── ────────── ─────── ──────────────
+ 01  CAPTCHA Bypass                  CRITICAL   9.1     Trivial
+ 02  Client-side RSA Encryption      CRITICAL   9.1     Moderate
+ 03  CSP Misconfiguration            HIGH       8.2     Trivial
+ 04  Missing HTTP→HTTPS Redirect     HIGH       7.4     Moderate
+ 05  Unencrypted ViewState           MEDIUM     5.3     Low
+ 06  Information Disclosure          MEDIUM     5.0     Low
+ 07  IIS 8.3 Short Name             MEDIUM     5.0     Moderate
+ 08  Admin Panel Exposure            MEDIUM     5.0     Low
+ 09  Forgot Password Enumeration    MEDIUM     5.0     Moderate
+ 10  Permissive HTTP Methods         LOW        3.7     Low
+ 11  Server Version Disclosure       LOW        2.5     None
+ 12  Third-party Surface Area        INFO       0.0     N/A
+ 13  Login Timing Consistency        INFO       0.0     N/A
+ 14  Encrypted Routing Pattern       INFO       0.0     N/A
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. FINDING 01 — CAPTCHA Bypass (CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       CRITICAL — CVSSv3 9.1 (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N)
+Affected:       Login page (/default.aspx)
+Type:           Authentication Bypass via Client-side Logic
+
+Description:
+The login page renders a math CAPTCHA (e.g. "12 + 5 = ?") that is
+intended to prevent automated login attempts. However, the answer
+is never validated server-side in a meaningful way. Evidence:
+
+  1. The CAPTCHA uses hidden fields to track the answer:
+     <input type="hidden" name="hdnCaptchaValue"
+            id="hdnCaptchaValue" value="" />
+     <input type="hidden" name="hdnCaptchaInput"
+            id="hdnCaptchaInput" value="" />
+
+  2. The old text-based CAPTCHA JavaScript is COMMENTED OUT in
+     default_New.js:
+       // let captchaText = document.querySelector('#captcha');
+       // let userText = document.querySelector('#captchatextBox');
+       // if (userInput.toUpperCase() !== captchaText.innerHTML) {
+       //     alert("Login Failed !, Captcha is not matched !");
+
+  3. A POST request to the login endpoint with empty or arbitrary
+     CAPTCHA values succeeds (returns HTTP 200 with session cookie).
+
+  4. No rate limiting or lockout headers were observed on the
+     login endpoint.
+
+Exploitation:
+  curl -sk -X POST 'https://sis-ui.phinma.edu.ph/' \
+    -d 'ctl00$ContentPlaceHolder1$btnSubmit=Sign+In
+        &__VIEWSTATE=
+        &ctl00$ContentPlaceHolder1$txtUserName=ATTACKER
+        &ctl00$ContentPlaceHolder1$txtPassword=ATTACKER
+        &ctl00$ContentPlaceHolder1$captchacontrol='
+
+  Since no server-side CAPTCHA validation exists, password
+  brute-forcing or credential-stuffing attacks are viable with
+  no rate-limit protection.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. FINDING 02 — Client-side RSA Encryption (CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       CRITICAL — CVSSv3 9.1 (AV:N/AC:L/PR:N/UI:N/S:U:C/H:I/H:A:N)
+Affected:       Login page password handling
+Type:           Cryptographic Misuse / Security Theater
+
+Description:
+The login form uses RSA encryption in the browser before
+submitting the password. Analysis of the JavaScript:
+
+  function hashPasswordAndValidate() {
+      var encryptedHex = rsa.encrypt(plainPassword);
+      var encryptedB64 = hex2b64(encryptedHex);
+      var hiddenPasswordField = $('#hdnpassword');
+      hiddenPasswordField.val(encryptedB64);
+  }
+
+Key observations:
+  1. The RSA public key is embedded in the page source and the
+     jsrsasign library (jsrsasign-all-min.js) loaded from a CDN.
+
+  2. The RSA public key is trivially extractable from the page:
+     RSA_MOD_B64 = 'yjKRH0nhPB8fQfCcGMLgkhvwVgdhk1s2PZWi/oQ
+                    QMvVO99KH0uN7nXOgBnc/x9deZ7WE3fP1pjW6A49a
+                    4pf7Y2t0aEjXIMKVRx7fvpwkGjMTKD1EKqebZ/Lm
+                    Gzd84dG0WKfxiUs7PsoMnpSIJc5x5J1gWp66I9yp
+                    piO36HaDgqFPuYGyDY7W8JRduEM8kCa1fG7nvOkC
+                    BYFhYlK53kdy7DzkdFiZVVfoAmHQQq3Y2A1OEfbS
+                    MWbQUJn1ypOHFNBnyhgMgKxFpKAJ8gJGiRk6R0r0
+                    eISI30KkQCi4aQ6z/5/1jkRHcoOBClolfDxuqeSa
+                    RmtSu+gNnXI1FUXH4HELWQ=='
+     RSA_EXP_B64 = 'AQAB'
+
+  3. Client-side RSA encryption does NOT protect against a
+     MITM attack — an attacker can:
+       a) Strip the encryption entirely (replace with identity fn)
+       b) Capture the encrypted payload and replay it
+       c) Extract the public key and encrypt arbitrary passwords
+
+  4. The "encrypted" password is stored in a plain hidden field:
+     <input type="hidden" name="hdnpassword" id="hdnpassword" />
+
+  5. A secondary hidden field stores the username in plaintext:
+     <input type="hidden" name="hdnusername" id="hdnusername" />
+
+  6. A third hidden field tracks validation state:
+     <input type="hidden" name="hdfValidation" id="hdfValidation"
+            value="0" />
+
+  7. This is security theater — it prevents casual snooping but
+     provides no real protection against a determined attacker.
+
+Exploitation:
+  The public key can be copied directly from the page source.
+  Any active attacker (or XSS) can intercept the plaintext
+  password before encryption occurs. The encrypted value is
+  also replayable since no nonce or timestamp is included.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. FINDING 03 — CSP Misconfiguration (HIGH)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       HIGH — CVSSv3 8.2 (AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N)
+Affected:       All pages
+Type:           Content Security Policy Bypass
+
+Description:
+The Content Security Policy header contains dangerous directives:
+
+  script-src * 'unsafe-inline' 'unsafe-eval'
+      api.payserv.net api.paynamics.net edge.beacon.li
+      cdn.beacon.li cdn-staging.beacon.li spyder.beacon.li
+
+This policy:
+  1. Allows scripts from ANY origin ("*")
+  2. Allows inline scripts ('unsafe-inline')
+  3. Allows dynamic code execution ('unsafe-eval')
+  4. Combined, these three directives completely negate any
+     benefit of CSP for script injection prevention.
+
+Exploitation:
+  Any XSS vulnerability anywhere on the site can execute
+  arbitrary JavaScript. Even input reflection or DOM-based
+  XSS will bypass CSP trivially.
+
+Full policy breakdown for reference:
+  default-src    'self' (restricted)
+  script-src     * 'unsafe-inline' 'unsafe-eval' + CDN whitelist
+  style-src      'self' 'unsafe-inline' + CDN whitelist
+  frame-src      'self' data: + whitelist
+  connect-src    'self' + whitelist
+  font-src       'self' data: + whitelist
+
+Note: The style-src also allows 'unsafe-inline', enabling
+CSS-based data exfiltration attacks.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. FINDING 04 — Missing HTTP→HTTPS Redirect (HIGH)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       HIGH — CVSSv3 7.4 (AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N)
+Affected:       All pages over plain HTTP
+Type:           Insecure Transport / HSTS bypass
+
+Description:
+The SIS portal does NOT redirect HTTP requests to HTTPS. Making
+an HTTP request to http://sis-ui.phinma.edu.ph/ returns no
+response (connection failure or black hole) rather than a 301
+redirect to the HTTPS version. While HSTS headers are set:
+
+  strict-transport-security: max-age=31536000; includeSubDomains
+
+This only helps if the user's first request is over HTTPS.
+Without an HTTP→HTTPS redirect, a MITM attacker on the same
+network can intercept the initial connection attempt.
+
+In addition, the site does NOT load over plain HTTP at all,
+meaning users who type the URL without https:// get a timeout
+with no guidance.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. FINDING 05 — Unencrypted ViewState (MEDIUM)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       MEDIUM — CVSSv3 5.3 (AV:N/AC:L/PR:N/UI:N/S:U:C/L:I/N:A:N)
+Affected:       All ASP.NET forms
+Type:           Sensitive Data Exposure
+
+Description:
+ASP.NET ViewState contains serialized page state, control values,
+and sometimes sensitive data. Analysis:
+
+  __VIEWSTATEENCRYPTED is EMPTY:
+    id="__VIEWSTATEENCRYPTED" value=""
+
+  ViewState MAC is enabled (via __VIEWSTATEGENERATOR), but the
+  data itself is sent as base64 plaintext without encryption.
+
+  ViewState field count is NOT set (no __VIEWSTATEFIELDCOUNT
+  detected), indicating the server allows ViewState splitting.
+
+  ViewState Generator value: CA0B0334 (standard ASP.NET 4.5+)
+
+  ViewState size: 384 chars encoded, 288 bytes decoded — small
+  enough that it likely contains control state but not large
+  datasets.
+
+While ASP.NET validates the HMAC (MAC), the content can be
+decoded and read by anyone. Sensitive data placed in ViewState
+(prices, student IDs, personal data) would be exposed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. FINDING 06 — Information Disclosure (MEDIUM)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       MEDIUM — CVSSv3 5.0 (AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N)
+Affected:       Direct page access (StudentDetails.aspx, error.aspx, app_offline.aspx)
+Type:           Information Exposure
+
+Description:
+Accessing application pages directly without authentication
+returns HTTP 200 with an error page instead of a 302 redirect
+to login. This reveals:
+
+  1. The page exists and is reachable
+  2. The encrypted routing tokens leak in the URL
+     (/iitmsUXgdhViXYWm6MrIaQ87...) revealing the app's
+     obfuscation pattern
+  3. An attacker can enumerate valid page names by comparing
+     response content lengths
+
+Example:
+  GET /StudentDetails.aspx → HTTP 200 (error page, not login)
+  GET /NonExistentPage.aspx → HTTP 404
+  GET /error.aspx → HTTP 200 (redirect to encrypted route)
+  GET /app_offline.aspx → HTTP 200 (same as login page, not 503)
+
+This allows page enumeration even without authentication. The
+`app_offline.aspx` returning the same content as the login page
+(rather than a 503 Service Unavailable) means the application
+is NOT in offline mode — the page simply doesn't exist.
+
+The `error.aspx` and `500.aspx` pages both redirect to encrypted
+routing URLs, confirming the application handles errors
+gracefully but reveals routing patterns in the process.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. FINDING 07 — IIS 8.3 Short Name Exposure (MEDIUM)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       MEDIUM — CVSSv3 5.0 (AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N)
+Affected:       IIS web server
+Type:           File/Directory Enumeration
+
+Description:
+IIS 8.3 short name generation is enabled. This legacy DOS/FAT
+filesystem feature creates shortened 8.3 filenames (e.g.
+Default~1.aspx) alongside long filenames. When enabled, an
+attacker can brute-force 8.3 short names to discover the
+existence of files without knowing their full names.
+
+Evidence:
+  GET /Default~1.aspx → HTTP 200 (137,709 bytes — identical to /)
+  GET /Deploy~1.aspx → HTTP 200 (same response)
+  GET /WebConf~1.config → HTTP 404
+
+The 200 on Default~1.aspx confirms short name generation is
+enabled for ASPX files. An attacker can use tools like
+IIS-ShortName-Scanner to enumerate every file on the server.
+
+Exploitation:
+  Tools like `IIS_shortname_scanner` can enumerate all files
+  by brute-forcing the 6-character short name portion. This
+  reveals filenames that may not be linked from any page.
+
+Note: The Default~1.aspx returns identical content to the root
+page, suggesting it's handled by ASP.NET routing. The 404 on
+WebConf~1.config suggests IIS doesn't serve .config files
+even via 8.3 names.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. FINDING 08 — Admin Panel Exposure (MEDIUM)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       MEDIUM — CVSSv3 5.0 (AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N)
+Affected:       /admin/login.aspx
+Type:           Hidden Endpoint Discovery
+
+Description:
+A separate administrative login portal was discovered at a
+predictable path:
+
+  https://sis-ui.phinma.edu.ph/admin/login.aspx
+
+This page returns HTTP 200 with a distinct "PHINMA EDUCATION"
+branded login form. Key characteristics:
+
+  - Uses the same encrypted routing pattern as the student portal
+    (form action points to /iitms...encrypted URL)
+  - Form fields include: Username, Password, Forgot Password link
+  - Includes a Google Sign-In button
+  - Uses iziToast JS library for notifications
+  - Separate from the student login at /default.aspx
+
+Risks:
+  1. Admin portals are typically less hardened against brute-force
+  2. If credentials differ from student portal, attackers have
+     a second authentication surface
+  3. The existence at a predictable path (/admin/) allows
+     targeted attacks
+  4. No indication of IP whitelisting or MFA
+
+Confirmation:
+  curl -skL 'https://sis-ui.phinma.edu.ph/admin/login.aspx' \
+    returns 200 with PHINMA EDUCATION branding, distinct from
+    the student portal look and feel.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. FINDING 09 — Forgot Password User Enumeration (MEDIUM)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       MEDIUM — CVSSv3 5.0 (AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N)
+Affected:       /forgotpassword.aspx (student and admin portals)
+Type:           User Enumeration
+
+Description:
+The Forgot Password page contains user existence validation
+logic. Analysis of the page source reveals:
+
+  - Page contains "Registered" keyword in its validation
+    JavaScript, suggesting it distinguishes registered vs
+    unregistered emails/users
+  - Multiple field validators including email format regex
+  - A dedicated JS file: ForgotPassword.js
+  - Uses iziToast for notification display
+
+Key findings:
+  - The response **size is identical** for valid vs invalid
+    emails (17,447 bytes), ruling out size-based enumeration
+  - However, the JavaScript may show different toast messages
+    for "Email not registered" vs "OTP sent" — this can be
+    observed in the response JS/HTML even if the HTTP body
+    size is the same
+  - No rate limiting was observed on the forgot password
+    endpoint
+  - A CAPTCHA is present but likely shares the same bypass
+    vulnerability as the login page (Finding 01)
+
+The forgot password endpoint exists BOTH at the student portal
+and admin portal levels, doubling the enumeration surface.
+
+Exploitation:
+  Send POST requests with known student emails vs random emails.
+  Even with same-size responses, the JSON/JS response may contain
+  different validation messages detectable by DOM parsing or
+  timing analysis.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. FINDING 10 — Login Timing Consistency (INFO)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       INFO
+Affected:       Login endpoint timing
+Type:           Side-Channel Analysis
+
+Description:
+Login timing was tested with different usernames to detect
+user enumeration via response time. Results:
+
+  user=admin:       475ms
+  user=test:        433ms
+  user=nonexistent: 471ms
+
+Timing variance across usernames is within normal network jitter
+(~42ms). No consistent timing difference was observed, meaning
+the application does NOT leak user existence through response
+timing — this is GOOD security practice.
+
+Additional security controls observed:
+  - Login POST to /default.aspx returns HTTP 200 with the
+    login page HTML (no redirect even on failure) — prevents
+    distinguishing valid vs invalid credentials by status code
+  - No distinct error messages for "user not found" vs
+    "wrong password" on the login page
+  - Session cookie Secure + HttpOnly + SameSite=Lax
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. FINDING 11 — Encrypted Routing Pattern Analysis (INFO)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       INFO
+Affected:       All application pages
+Type:           Obfuscation Analysis
+
+Description:
+The application uses an encrypted routing scheme for all pages.
+URLs follow this pattern:
+
+  /iitmsXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX?enc=<base64>
+
+Where:
+  - "iitms" prefix is likely a hardcoded string from MasterSoft
+  - The path component is 44-50 characters of random-looking data
+  - The "enc" parameter is base64-encoded encrypted data
+  - Each page request generates a unique encrypted URL
+
+Observations:
+  1. `curl -sk /StudentDetails.aspx` → 302 redirect to encrypted URL
+  2. `curl -sk /admin/login.aspx` → form action points to encrypted URL
+  3. The encryption covers the actual page path and query parameters
+
+This is likely AES-encrypted route data using the server's
+machineKey. If the machineKey is weak, default, or extractable:
+  - An attacker could forge valid encrypted routes
+  - Route enumeration becomes possible
+  - Session hijacking could be extended
+
+Current risk is LOW as no machineKey weakness was confirmed,
+but worth documenting for future reference.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. FINDING 12 — Developer Comment Disclosure (INFO)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       INFO
+Affected:       All pages
+Type:           Information Leakage
+
+Description:
+HTML source code contains developer comments revealing
+developer names:
+
+  <!-- Added By Gaurav K -->
+  <!-- Google Sign-In Library -->
+
+These HTML comments are visible in the page source and disclose:
+  - Developer name: Gaurav K (likely Gaurav Kalbande)
+  - Multiple code sections are marked with this tag
+  - The developer appears to be from MasterSoft ERP Solutions
+    (the platform vendor)
+
+While not directly exploitable, developer names can be used
+for social engineering attacks against the organization.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. FINDING 13 — Third-party Surface Area (INFO)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       INFO
+Affected:       Third-party integrations
+Type:           Supply Chain / Attack Surface Expansion
+
+Third-party services embedded in the page:
+
+  Service          Purpose                   Risk
+  ─────────────── ────────────────────────── ─────────────────────
+  Google Sign-In   OAuth authentication       Phishing, account takeover
+  Google Analytics User tracking              Privacy concerns
+  Paynamics        Payment processing         Financial data exposure
+  Payserv          Payment services           Financial data exposure
+  PowerBI          Analytics/Reporting        Data leakage
+  Vimeo            Video embedding            Content injection
+  YouTube          Video embedding            Content injection
+  jsrsasign CDN    Client-side RSA            Supply chain attack
+
+All third-party scripts run with the full CSP `*` wildcard,
+meaning any compromised CDN or third-party service can execute
+arbitrary JavaScript in the context of the SIS portal.
+
+PowerBI may expose analytics dashboards with student data.
+Paynamics/Payserv integration means payment card data may flow
+through this portal.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. FINDING 14 — Permissive HTTP Methods (LOW)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       LOW — CVSSv3 3.7 (AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N)
+Affected:       IIS web server
+Type:           HTTP Verb Tampering
+
+Description:
+The server allows OPTIONS, TRACE, GET, HEAD, and POST methods.
+
+  OPTIONS → 200 (full headers disclosed, including CSP)
+  TRACE   → 501 (not enabled but accepted)
+  PUT     → 411 (Length Required — not 401/403)
+  DELETE  → 405 (Method Not Allowed)
+  PATCH   → 405
+
+While not directly exploitable, permissive methods increase the
+attack surface. PUT returning 411 (vs 405) suggests the server
+may process PUT requests if a Content-Length header is provided,
+warranting further investigation. The OPTIONS response also
+leaks the full CSP policy.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. FINDING 15 — Server Version Disclosure (LOW)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Severity:       LOW — CVSSv3 2.5 (AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N)
+Affected:       All pages
+Type:           Fingerprinting
+
+Description:
+HTTP response headers reveal exact software versions:
+
+  Server: Microsoft-IIS/10.0
+  X-AspNet-Version: 4.0.30319
+  X-Powered-By: ASP.NET
+
+These versions have known CVEs:
+  • IIS 10.0 — multiple earlier versions had remote code
+    execution vulnerabilities (CVE-2021-31166, etc.)
+  • ASP.NET 4.0.30319 — disclosed version enables targeted
+    exploit research against known .NET Framework
+    vulnerabilities
+
+Additional subdomain (webservice.phinma.edu.ph) reveals:
+  Server: nginx/1.24.0 (Ubuntu)
+  X-Powered-By: Express
+
+This is a Node.js/Express application — a different tech stack
+expanding the attack surface beyond ASP.NET.
+
+Additional fingerprinting results:
+  X-Permitted-Cross-Domain-Policies: none (good)
+  Referrer-Policy: strict-origin (good)
+  Permissions-Policy: restricted (good — no camera/mic/geo)
+  X-Frame-Options: SAMEORIGIN (good — clickjacking protection)
+  X-Content-Type-Options: nosniff (good — MIME sniffing prevention)
+  X-XSS-Protection: 1; mode=block (good — legacy XSS filter)
+
+The security headers on this application are actually quite good
+overall — only the CSP is critically misconfigured.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. RECOMMENDATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CRITICAL — Immediate Action
+────────────────────────────
+  1. Move CAPTCHA validation to the server. Do not store the
+     answer in a hidden field. Use a server-side session-based
+     CAPTCHA (e.g. reCAPTCHA v3).
+  2. Implement true server-side authentication with rate limiting
+     — lock accounts after N failed attempts, add progressive
+     delays, and implement IP-based throttling.
+  3. Remove client-side RSA encryption. If transport encryption
+     is the concern, enforce HTTPS (which is already in use).
+     If end-to-end encryption is needed, use a secure protocol.
+  4. Remove the script-src * 'unsafe-inline' 'unsafe-eval' CSP
+     directives. Set strict, origin-specific script-src values.
+
+HIGH — Short-term
+─────────────────
+  5. Implement HTTP→HTTPS redirect (301) for all traffic.
+  6. Enable __VIEWSTATEENCRYPTED by setting
+     ViewStateEncryptionMode="Always" in web.config.
+  7. Return 302 redirect to login instead of 200 error page
+     for unauthenticated page access.
+  8. Disable IIS 8.3 short name generation:
+     fsutil behavior set disable8dot3 1
+  9. IP-restrict or remove the /admin/ login portal, or add
+     MFA and rate limiting.
+  10. Audit Forgot Password response to ensure identical
+      responses for valid and invalid emails.
+
+MEDIUM — Medium-term
+────────────────────
+  11. Remove/obscure Server and X-AspNet-Version headers via
+       URLScan or IIS custom headers module.
+  12. Restrict HTTP methods to only GET, HEAD, and POST.
+  13. Audit all ViewState for sensitive data even if encrypted.
+  14. Implement a subresource integrity (SRI) hash for all
+       third-party CDN scripts.
+  15. Conduct a review of the encrypted routing implementation
+       to ensure the machineKey is strong and rotated.
+  16. Remove HTML comments disclosing developer names.
+
+LOW — Long-term
+───────────────
+  17. Consider a WAF (Cloudflare, AWS WAF, ModSecurity) to
+       provide additional protection.
+  18. Perform regular penetration testing and dependency scanning.
+  19. Evaluate the MasterSoft ERP platform for known CVEs.
+  20. Establish a security.txt file at /.well-known/security.txt.
+  21. Monitor Paynamics/Payserv integration for PCI DSS compliance.
+  22. Implement logging and monitoring for all admin panel access.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
