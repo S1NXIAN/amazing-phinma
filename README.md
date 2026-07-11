@@ -1,4 +1,4 @@
-# amazing-phinma
+# phinma-sis-vulnerabilities
 
 Security assessment of PHINMA University of Iloilo's Student Information System.
 
@@ -6,9 +6,10 @@ Security assessment of PHINMA University of Iloilo's Student Information System.
 |--------|--------|
 | **Target** | `https://sis-ui.phinma.edu.ph/` |
 | **Stack** | ASP.NET 4.0.30319 / IIS 10 / MasterSoft ERP |
-| **Date** | 2026-07-03 |
+| **Initial Assessment** | 2026-07-03 |
+| **Re-verified** | 2026-07-11 |
 | **Scope** | Authenticated + unauthenticated black-box testing |
-| **Findings** | 1 Critical, 1 High |
+| **Findings** | 0 Critical, 2 High (1 downgraded: CAPTCHA partially mitigated, rate limiting persists)
 
 ---
 
@@ -19,69 +20,59 @@ reproduction evidence. Fourteen other findings from the initial scan were
 retracted after failing reproduction — the full list is in
 [`phinma-vulnerabilities.txt`](./phinma-vulnerabilities.txt).
 
-| ID | Severity | Finding | CVSS |
-|----|----------|---------|------|
-| 01 | 🔴 Critical | CAPTCHA solvable + no rate limiting | 8.6 |
-| 02 | 🟠 High | CSP misconfiguration nullifies XSS defense | 8.2 |
+| ID | Severity | Finding | CVSS | Status |
+|----|----------|---------|------|--------|
+| 01 | 🔴 Critical → 🟠 High | CAPTCHA partially mitigated, rate limiting still absent | 8.6 | **Downgraded** — plaintext CAPTCHA removed, but OTP login still has no rate limiting |
+| 02 | 🟠 High | CSP misconfiguration nullifies XSS defense | 8.2 | **Unchanged** — same CSP header |
 
 ---
 
-## Finding 01 — CAPTCHA Solvable + No Rate Limiting (Critical)
+## Finding 01 — No Rate Limiting on Login (High) [Downgraded from Critical]
 
 **CVSS: 8.6** · `AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N`
 
+**⚠ Re-verified 2026-07-11:** The plaintext math CAPTCHA has been removed — it's now handled via hidden fields (`hdnCaptchaValue`, `hdnCaptchaInput`), likely a client-side JS challenge. This is a meaningful improvement over the old plaintext-in-HTML approach. However, the underlying rate-limiting gap remains.
+
 ### The Gap
 
-The login page renders a math CAPTCHA as plain text in the HTML:
-
-```text
-StaticText "57"   StaticText "+"   StaticText "9"   → answer: 66
-```
-
-No image, distortion, or noise. The server validates the answer correctly
-(confirmed with wrong-answer rejection), but two problems make brute-force
-viable:
-
-1. **CAPTCHA is trivially parseable** — a 3-line regex extracts both numbers
-   and sums them with 100% accuracy.
-
-2. **No rate limiting or account lockout** — ten consecutive rapid POSTs all
-   returned HTTP 200 at consistent timing. No 429, no 403, no degradation.
-
-### Reproduction
+The login page now uses an OTP-based flow (`btnGetOtp`) instead of direct password submission. Rapid sequential POSTs to the login endpoint all return HTTP 302 with no throttling:
 
 ```bash
-for i in $(seq 1 10); do
-  curl -sk -X POST 'https://sis-ui.phinma.edu.ph/' \
-    -d "ctl00\$ContentPlaceHolder1\$txtUserName=04-2324-042031" \
-    -d "ctl00\$ContentPlaceHolder1\$txtPassword=WRONG\$i" \
-    -d 'ctl00$ContentPlaceHolder1$captchacontrol=999' \
-    -d 'ctl00$ContentPlaceHolder1$btnSubmit=Sign In' \
+# Re-verification: 5 rapid OTP requests, all returned 302 (no throttle)
+for i in $(seq 1 5); do
+  curl -s -X POST 'https://sis-ui.phinma.edu.ph/' \
+    -d 'txt_username=04-2324-042031' \
+    -d "txt_password=WRONG$i" \
+    -d 'hdnCaptchaValue=0' \
+    -d 'hdnCaptchaInput=0' \
+    -d 'btnGetOtp=Get+OTP' \
     -o /dev/null -w "%{http_code} %{time_total}s\n"
 done
-# Result: all 10 returned 200. No throttling. Account still usable after.
+# Result: all 5 returned 302. No throttling.
 ```
 
-### Impact
+The form fields were also redesigned (old naming convention replaced), and an OTP step was added — which changes the attack surface but does not eliminate the brute-force vector.
 
-- **30 attempts/sec** per thread on a consumer laptop (multi-threaded C)
-- **1M passwords** (top of rockyou) tested against one student ID in ~9 hours
-- Student IDs follow predictable `XX-XXXX-XXXXXX` format — valid targets
-  are trivially discoverable
-- Student passwords commonly follow weak patterns (birthdays, pet names,
-  "Student@123") present in common wordlists
+### Impact (Revised)
+
+- The new hidden-field CAPTCHA may be bypassable via JS analysis (not assessed in depth)
+- OTP adds a factor but does not prevent enumeration or rate-limited brute-force
+- Student IDs remain predictable (`XX-XXXX-XXXXXX`)
+- No account lockout observed after repeated failures
 
 ### Recommendation
 
-1. Implement exponential rate limiting on login — lockout after 5 failures
-2. Replace plaintext math CAPTCHA with reCAPTCHA v3 or image-based challenge
-3. Ensure no CAPTCHA answer exists in the client-side DOM
+1. Add server-side rate limiting — exponential backoff after 5 failures per IP/account
+2. Replace hidden-field CAPTCHA with a proper challenge (reCAPTCHA v3 or image-based)
+3. Consider account lockout after N failed OTP attempts
 
 ---
 
-## Finding 02 — CSP Misconfiguration (High)
+## Finding 02 — CSP Misconfiguration (High) [Unchanged]
 
 **CVSS: 8.2** · `AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N`
+
+**⚠ Re-verified 2026-07-11:** CSP header is identical — still `script-src * 'unsafe-inline' 'unsafe-eval'`.
 
 ### The Gap
 
@@ -177,13 +168,14 @@ Each finding was subjected to the same process:
 ## Reproduce Commands
 
 ```bash
-# Rate limit stress test
-for i in $(seq 1 10); do
-  curl -sk -X POST 'https://sis-ui.phinma.edu.ph/' \
-    -d "ctl00\$ContentPlaceHolder1\$txtUserName=04-2324-042031" \
-    -d "ctl00\$ContentPlaceHolder1\$txtPassword=WRONG\$i" \
-    -d 'ctl00$ContentPlaceHolder1$captchacontrol=999' \
-    -d 'ctl00$ContentPlaceHolder1$btnSubmit=Sign In' \
+# Rate limit stress test (new OTP endpoint)
+for i in $(seq 1 5); do
+  curl -s -X POST 'https://sis-ui.phinma.edu.ph/' \
+    -d 'txt_username=04-2324-042031' \
+    -d "txt_password=WRONG$i" \
+    -d 'hdnCaptchaValue=0' \
+    -d 'hdnCaptchaInput=0' \
+    -d 'btnGetOtp=Get+OTP' \
     -o /dev/null -w "%{http_code} %{time_total}s\n"
 done
 
@@ -205,5 +197,5 @@ This README reflects only the confirmed, stress-tested vulnerabilities.
 
 ---
 
-*Assessment date: 2026-07-03*
+*Assessment date: 2026-07-03 · Re-verified: 2026-07-11*
 *Target: https://sis-ui.phinma.edu.ph/*
